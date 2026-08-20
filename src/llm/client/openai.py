@@ -9,6 +9,18 @@ from src.utils.log import logger
 import openai
 
 
+# OpenAI 各模型的上下文窗口大小（tokens）
+# 参考：https://platform.openai.com/docs/models
+OPENAI_CONTEXT_WINDOWS = {
+    "gpt-4o":          128_000,
+    "gpt-4o-mini":     128_000,
+    "gpt-4-turbo":     128_000,
+    "gpt-4":             8_192,
+    "gpt-3.5-turbo":  16_385,
+}
+OPENAI_DEFAULT_CONTEXT = 128_000
+
+
 class OpenAIClient(BaseClient):
     """OpenAI client for chat models."""
 
@@ -20,6 +32,10 @@ class OpenAIClient(BaseClient):
 
         self.client = OpenAI(api_key=self.api_key, base_url=self.base_url)
         self.default_model = os.getenv("OPENAI_API_MODEL", "gpt-4o-mini")
+
+    def get_max_context_tokens(self) -> int:
+        """返回当前模型的上下文窗口大小"""
+        return OPENAI_CONTEXT_WINDOWS.get(self.default_model, OPENAI_DEFAULT_CONTEXT)
 
     def completions(self,
                     messages: List[Dict[str, str]],

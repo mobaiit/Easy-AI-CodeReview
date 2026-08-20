@@ -9,6 +9,15 @@ from src.utils.log import logger
 import requests
 
 
+# DeepSeek 各模型的上下文窗口大小（tokens）
+# 参考：https://api-docs.deepseek.com/quick_start/pricing
+DEEPSEEK_CONTEXT_WINDOWS = {
+    "deepseek-chat": 64_000,    # DeepSeek-V3
+    "deepseek-reasoner": 64_000, # DeepSeek-R1
+}
+DEEPSEEK_DEFAULT_CONTEXT = 64_000
+
+
 class DeepSeekClient(BaseClient):
     def __init__(self, api_key: str = None):
         self.api_key = api_key or os.getenv("DEEPSEEK_API_KEY")
@@ -18,6 +27,10 @@ class DeepSeekClient(BaseClient):
 
         self.client = OpenAI(api_key=self.api_key, base_url=self.base_url) # DeepSeek supports OpenAI API SDK
         self.default_model = os.getenv("DEEPSEEK_API_MODEL", "deepseek-chat")
+
+    def get_max_context_tokens(self) -> int:
+        """返回当前模型的上下文窗口大小"""
+        return DEEPSEEK_CONTEXT_WINDOWS.get(self.default_model, DEEPSEEK_DEFAULT_CONTEXT)
 
     def completions(self,
                     messages: List[Dict[str, str]],

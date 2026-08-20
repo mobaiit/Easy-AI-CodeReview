@@ -1,6 +1,8 @@
 import abc
+import functools
 import os
 import re
+import threading
 from typing import Dict, Any, List
 
 import yaml
@@ -10,42 +12,97 @@ from src.llm.factory import Factory
 from src.utils.log import logger
 from src.utils.token_util import count_tokens, truncate_text_by_tokens
 
+# ---------------------------------------------------------------------------
+# 进程级 LLM 客户端单例
+# 同一个进程（RQ Worker 或子进程）在处理多个任务时复用同一个客户端实例，
+# 避免重复初始化 HTTP Session / 连接池。
+# 使用锁保证多线程环境下的安全初始化。
+# ---------------------------------------------------------------------------
+_llm_client_lock = threading.Lock()
+_llm_client = None
+
+
+def _get_llm_client():
+    global _llm_client
+    if _llm_client is None:
+        with _llm_client_lock:
+            if _llm_client is None:
+                _llm_client = Factory.getClient()
+    return _llm_client
+
+
+# ---------------------------------------------------------------------------
+# 提示词模板缓存
+# 用文件的修改时间（mtime）作为缓存 key 的一部分。
+# 当 prompt_templates.yml 被修改后，mtime 发生变化，lru_cache 会产生新的
+# cache key，旧缓存自动失效，无需重启服务即可加载新提示词。
+# ---------------------------------------------------------------------------
+_PROMPT_FILE = "config/prompt_templates.yml"
+
+
+def _get_prompt_file_mtime() -> float:
+    """获取提示词文件的修改时间，文件不存在时返回 0。"""
+    try:
+        return os.path.getmtime(_PROMPT_FILE)
+    except OSError:
+        return 0.0
+
+
+@functools.lru_cache(maxsize=128)
+def _load_prompt_template_cached(prompt_key: str, style: str, _mtime: float) -> tuple:
+    """
+    从 config/prompt_templates.yml 加载并渲染提示词，结果按 (prompt_key, style, mtime) 缓存。
+    mtime 变化时（文件被修改）自动使用新内容，无需重启。
+    返回 (system_prompt_str, user_prompt_str) 元组。
+    """
+    with open(_PROMPT_FILE, "r", encoding="utf-8") as file:
+        all_prompts = yaml.safe_load(file)
+
+    prompts = all_prompts.get(prompt_key)
+    if not prompts:
+        raise KeyError(f"提示词配置中找不到 key: {prompt_key}")
+
+    def render(template_str: str) -> str:
+        return Template(template_str).render(style=style)
+
+    return render(prompts["system_prompt"]), render(prompts["user_prompt"])
+
+
+def load_prompt_template(prompt_key: str, style: str) -> tuple:
+    """
+    加载提示词模板的公开接口。
+    自动传入当前文件 mtime，实现热更新感知缓存。
+    """
+    return _load_prompt_template_cached(prompt_key, style, _get_prompt_file_mtime())
+
 
 class BaseReviewer(abc.ABC):
     """代码审查基类"""
 
     def __init__(self, prompt_key: str):
-        self.client = Factory().getClient()
+        # 使用进程级单例客户端，避免重复初始化
+        self.client = _get_llm_client()
         self.prompts = self._load_prompts(prompt_key, os.getenv("REVIEW_STYLE", "professional"))
 
     def _load_prompts(self, prompt_key: str, style="professional") -> Dict[str, Any]:
-        """加载提示词配置"""
-        prompt_templates_file = "config/prompt_templates.yml"
+        """加载提示词配置（支持热更新，文件修改后自动生效）"""
         try:
-            # 在打开 YAML 文件时显式指定编码为 UTF-8，避免使用系统默认的 GBK 编码。
-            with open(prompt_templates_file, "r", encoding="utf-8") as file:
-                prompts = yaml.safe_load(file).get(prompt_key, {})
-
-                # 使用Jinja2渲染模板
-                def render_template(template_str: str) -> str:
-                    return Template(template_str).render(style=style)
-
-                system_prompt = render_template(prompts["system_prompt"])
-                user_prompt = render_template(prompts["user_prompt"])
-
-                return {
-                    "system_message": {"role": "system", "content": system_prompt},
-                    "user_message": {"role": "user", "content": user_prompt},
-                }
+            system_prompt, user_prompt = load_prompt_template(prompt_key, style)
+            return {
+                "system_message": {"role": "system", "content": system_prompt},
+                "user_message": {"role": "user", "content": user_prompt},
+            }
         except (FileNotFoundError, KeyError, yaml.YAMLError) as e:
             logger.error(f"加载提示词配置失败: {e}")
             raise Exception(f"提示词配置加载失败: {e}")
 
     def call_llm(self, messages: List[Dict[str, Any]]) -> str:
         """调用 LLM 进行代码审核"""
-        logger.info(f"向 AI 发送代码 Review 请求, messages: {messages}")
+        logger.debug(f"向 AI 发送代码 Review 请求, messages: {messages}")
+        logger.info("正在调用 LLM 进行代码审查...")
         review_result = self.client.completions(messages=messages)
-        logger.info(f"收到 AI 返回结果: {review_result}")
+        logger.debug(f"收到 AI 返回结果: {review_result}")
+        logger.info("LLM 审查完成")
         return review_result
 
     @abc.abstractmethod
@@ -58,8 +115,8 @@ class CodeReviewer(BaseReviewer):
     """代码 Diff 级别的审查"""
 
     def __init__(self):
-        # 不预加载通用提示词，而是动态加载
-        self.client = Factory().getClient()
+        # 使用进程级单例客户端，避免重复初始化
+        self.client = _get_llm_client()
         # 语言到提示词映射
         self.language_prompts = {
             'python': 'python_review_prompt',
@@ -129,7 +186,7 @@ class CodeReviewer(BaseReviewer):
                 if ext in file_extensions:
                     lang = file_extensions[ext]
                     language_counts[lang] = language_counts.get(lang, 0) + 1
-                    logger.info(f"检测到文件: {file_path}, 扩展名: {ext}, 语言: {lang}")
+                    logger.debug(f"检测到文件: {file_path}, 扩展名: {ext}, 语言: {lang}")
             
             # 检查代码内容中的Vue3特征
             line_lower = line.lower()
@@ -139,7 +196,7 @@ class CodeReviewer(BaseReviewer):
                 'composition api', 'script setup', '<script setup'
             ]):
                 vue3_indicators += 1
-                logger.info(f"检测到Vue3特征: {line.strip()}")
+                logger.debug(f"检测到Vue3特征: {line.strip()}")
         
         # 如果没有通过文件路径检测到语言，尝试从内容中检测
         if not language_counts:
@@ -148,7 +205,7 @@ class CodeReviewer(BaseReviewer):
                 '<template>', '<script>', '<style>', 'vue', '.vue'
             ]):
                 language_counts['vue'] = 1
-                logger.info("通过内容检测到Vue文件")
+                logger.debug("通过内容检测到Vue文件")
             
             # 检查JavaScript特征
             elif any(indicator in diffs_text.lower() for indicator in [
@@ -156,7 +213,7 @@ class CodeReviewer(BaseReviewer):
                 'console.log', 'document.', 'window.', 'addEventListener'
             ]):
                 language_counts['javascript'] = 1
-                logger.info("通过内容检测到JavaScript代码")
+                logger.debug("通过内容检测到JavaScript代码")
             
             # 检查Python特征
             elif any(indicator in diffs_text.lower() for indicator in [
@@ -164,7 +221,7 @@ class CodeReviewer(BaseReviewer):
                 'self.', 'return ', 'try:', 'except:', 'with open('
             ]):
                 language_counts['python'] = 1
-                logger.info("通过内容检测到Python代码")
+                logger.debug("通过内容检测到Python代码")
         
         # 返回出现最多的语言，如果没有检测到则返回默认
         if language_counts:
@@ -172,9 +229,9 @@ class CodeReviewer(BaseReviewer):
             
             # 如果是Vue且有Vue3特征，记录日志
             if primary_language == 'vue' and vue3_indicators > 0:
-                logger.info(f"检测到Vue3代码，Vue3特征数量: {vue3_indicators}")
+                logger.debug(f"检测到Vue3代码，Vue3特征数量: {vue3_indicators}")
             elif primary_language == 'vue':
-                logger.info(f"检测到Vue文件，但未发现Vue3特征，Vue3特征数量: {vue3_indicators}")
+                logger.debug(f"检测到Vue文件，但未发现Vue3特征，Vue3特征数量: {vue3_indicators}")
             
             logger.info(f"检测到主要编程语言: {primary_language}")
             return primary_language
@@ -187,57 +244,34 @@ class CodeReviewer(BaseReviewer):
         detected_lang = self._detect_language_from_diff(diffs_text)
         prompt_key = self.language_prompts.get(detected_lang, 'vue3_review_prompt')
         
-        # 添加详细的调试日志
-        logger.info(f"语言检测结果: {detected_lang}")
-        logger.info(f"语言映射: {detected_lang} -> {prompt_key}")
-        logger.info(f"可用的语言映射: {self.language_prompts}")
+        logger.debug(f"语言检测结果: {detected_lang} -> 提示词: {prompt_key}")
         
         # 临时修复：强制Vue文件使用Vue3提示词
         if detected_lang == 'vue':
-            logger.info("检测到Vue文件，强制使用vue3_review_prompt")
             return 'vue3_review_prompt'
         
         return prompt_key
 
     def _load_language_specific_prompts(self, prompt_key: str, style="professional") -> Dict[str, Any]:
-        """加载语言特定的提示词配置"""
-        prompt_templates_file = "config/prompt_templates.yml"
+        """加载语言特定的提示词配置（支持热更新）"""
         try:
-            with open(prompt_templates_file, "r", encoding="utf-8") as file:
-                prompts = yaml.safe_load(file).get(prompt_key, {})
-
-                def render_template(template_str: str) -> str:
-                    return Template(template_str).render(style=style)
-
-                system_prompt = render_template(prompts["system_prompt"])
-                user_prompt = render_template(prompts["user_prompt"])
-
-                return {
-                    "system_message": {"role": "system", "content": system_prompt},
-                    "user_message": {"role": "user", "content": user_prompt},
-                }
+            system_prompt, user_prompt = load_prompt_template(prompt_key, style)
+            return {
+                "system_message": {"role": "system", "content": system_prompt},
+                "user_message": {"role": "user", "content": user_prompt},
+            }
         except (FileNotFoundError, KeyError, yaml.YAMLError) as e:
             logger.error(f"加载语言特定提示词配置失败: {e}")
-            # 如果加载失败，回退到通用提示词
             return self._load_fallback_prompts(style)
 
     def _load_fallback_prompts(self, style="professional") -> Dict[str, Any]:
-        """加载通用提示词作为回退"""
-        prompt_templates_file = "config/prompt_templates.yml"
+        """加载通用提示词作为回退（支持热更新）"""
         try:
-            with open(prompt_templates_file, "r", encoding="utf-8") as file:
-                prompts = yaml.safe_load(file).get("code_review_prompt", {})
-
-                def render_template(template_str: str) -> str:
-                    return Template(template_str).render(style=style)
-
-                system_prompt = render_template(prompts["system_prompt"])
-                user_prompt = render_template(prompts["user_prompt"])
-
-                return {
-                    "system_message": {"role": "system", "content": system_prompt},
-                    "user_message": {"role": "user", "content": user_prompt},
-                }
+            system_prompt, user_prompt = load_prompt_template("code_review_prompt", style)
+            return {
+                "system_message": {"role": "system", "content": system_prompt},
+                "user_message": {"role": "user", "content": user_prompt},
+            }
         except (FileNotFoundError, KeyError, yaml.YAMLError) as e:
             logger.error(f"加载通用提示词配置失败: {e}")
             raise Exception(f"提示词配置加载失败: {e}")
@@ -301,28 +335,35 @@ class CodeReviewer(BaseReviewer):
 
         # 在截断之前先进行语言检测，确保能正确识别文件类型
         detected_language = self._detect_language_from_diff(changes_text)
-        logger.info(f"在截断前检测到的语言: {detected_language}")
         
         # 如果从diff中检测失败，尝试从changes数据中检测
         if detected_language == 'default' and original_changes_data:
-            logger.info("从diff中检测语言失败，尝试从changes数据中检测")
+            logger.debug("从diff中检测语言失败，尝试从changes数据中检测")
             detected_language = self._detect_language_from_changes(original_changes_data)
-            logger.info(f"从changes数据中检测到的语言: {detected_language}")
         
         # 如果超长，取前REVIEW_MAX_TOKENS个token
-        review_max_tokens = int(os.getenv("REVIEW_MAX_TOKENS", 10000))
+        # 优先使用环境变量中的显式配置；
+        # 如果没有配置，则从当前 LLM 客户端查询模型上下文窗口，
+        # 并预留 8000 tokens 给 system prompt、user prompt 模板和模型输出，
+        # 剩余全部用于 diff 内容。
+        env_max = os.getenv("REVIEW_MAX_TOKENS")
+        if env_max:
+            review_max_tokens = int(env_max)
+        else:
+            model_context = self.client.get_max_context_tokens()
+            review_max_tokens = model_context - 8_000
+            logger.info(f"REVIEW_MAX_TOKENS 未配置，自动使用模型上下文窗口: {model_context} - 8000 预留 = {review_max_tokens} tokens")
         
         # 计算tokens数量，如果超过REVIEW_MAX_TOKENS，截断changes_text
         tokens_count = count_tokens(changes_text)
         if tokens_count > review_max_tokens:
-            logger.info(f"代码过长，从 {tokens_count} tokens 截断到 {review_max_tokens} tokens")
+            logger.info(f"代码过长（{tokens_count} tokens），截断至 {review_max_tokens} tokens")
             changes_text = truncate_text_by_tokens(changes_text, review_max_tokens)
             # 截断后再次检测语言，以防截断破坏了文件路径信息
             truncated_language = self._detect_language_from_diff(changes_text)
-            logger.info(f"截断后检测到的语言: {truncated_language}")
             # 如果截断后检测不到语言，使用截断前的检测结果
             if truncated_language == 'default' and detected_language != 'default':
-                logger.info(f"截断后语言检测失败，使用截断前的检测结果: {detected_language}")
+                logger.debug(f"截断后语言检测失败，沿用截断前结果: {detected_language}")
                 final_language = detected_language
             else:
                 final_language = truncated_language
@@ -338,43 +379,26 @@ class CodeReviewer(BaseReviewer):
         """Review 代码并返回结果"""
         # 智能选择提示词
         if pre_detected_language and pre_detected_language != 'default':
-            # 使用预先检测到的语言
             detected_lang = pre_detected_language
-            logger.info(f"使用预先检测到的语言: {detected_lang}")
         else:
-            # 重新检测语言
             detected_lang = self._detect_language_from_diff(diffs_text)
-            logger.info(f"重新检测到的语言: {detected_lang}")
-            
-            # 如果从diff中检测失败，尝试从changes数据中检测
             if detected_lang == 'default' and changes_data:
-                logger.info("从diff中检测语言失败，尝试从changes数据中检测")
                 detected_lang = self._detect_language_from_changes(changes_data)
-                logger.info(f"从changes数据中检测到的语言: {detected_lang}")
         
         prompt_key = self.language_prompts.get(detected_lang, 'vue3_review_prompt')
         style = os.getenv("REVIEW_STYLE", "professional")
         
-        logger.info(f"检测到的语言对应的提示词: {prompt_key}")
-        logger.info(f"当前审查风格: {style}")
-        logger.info(f"可用的语言提示词映射: {self.language_prompts}")
+        logger.info(f"开始审查代码，语言: {detected_lang}，提示词: {prompt_key}，风格: {style}")
         
         # 加载对应的提示词
         if prompt_key != "code_review_prompt":
-            logger.info(f"使用语言特定提示词: {prompt_key}")
             try:
                 prompts = self._load_language_specific_prompts(prompt_key, style)
-                logger.info(f"成功加载语言特定提示词: {prompt_key}")
             except Exception as e:
                 logger.error(f"加载语言特定提示词失败: {e}, 回退到通用提示词")
                 prompts = self._load_fallback_prompts(style)
         else:
-            logger.info("使用通用提示词: code_review_prompt")
             prompts = self._load_fallback_prompts(style)
-        
-        # 记录实际使用的提示词内容（前100个字符）
-        system_content = prompts["system_message"]["content"]
-        logger.info(f"实际使用的system prompt前100字符: {system_content[:100]}...")
         
         messages = [
             prompts["system_message"],
@@ -418,14 +442,14 @@ class CodeReviewer(BaseReviewer):
                     if ext in file_extensions:
                         lang = file_extensions[ext]
                         language_counts[lang] = language_counts.get(lang, 0) + 1
-                        logger.info(f"从changes数据检测到文件: {file_path}, 扩展名: {ext}, 语言: {lang}")
+                        logger.debug(f"从changes数据检测到文件: {file_path}, 语言: {lang}")
         
         if language_counts:
             primary_language = max(language_counts, key=language_counts.get)
-            logger.info(f"从changes数据检测到主要编程语言: {primary_language}")
+            logger.debug(f"从changes数据检测到主要编程语言: {primary_language}")
             return primary_language
         
-        logger.info("从changes数据中未检测到特定编程语言")
+        logger.debug("从changes数据中未检测到特定编程语言")
         return 'default'
 
     @staticmethod

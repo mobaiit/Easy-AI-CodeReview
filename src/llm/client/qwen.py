@@ -9,6 +9,20 @@ from src.utils.log import logger
 import dashscope
 
 
+# 通义千问各模型的上下文窗口大小（tokens）
+# 参考：https://help.aliyun.com/zh/model-studio/getting-started/models
+QWEN_CONTEXT_WINDOWS = {
+    "qwen-turbo":        1_000_000,
+    "qwen-turbo-latest": 1_000_000,
+    "qwen-plus":         1_000_000,
+    "qwen-plus-latest":  1_000_000,
+    "qwen-max":          1_000_000,
+    "qwen-max-latest":   1_000_000,
+    "qwen-long":        10_000_000,
+}
+QWEN_DEFAULT_CONTEXT = 1_000_000
+
+
 class QwenClient(BaseClient):
     """Qwen client for chat models."""
 
@@ -22,6 +36,10 @@ class QwenClient(BaseClient):
         self.default_model = os.getenv("QWEN_API_MODEL", "qwen-turbo")
         self.extra_body={"enable_thinking": False}
         dashscope.api_key = self.api_key
+
+    def get_max_context_tokens(self) -> int:
+        """返回当前模型的上下文窗口大小"""
+        return QWEN_CONTEXT_WINDOWS.get(self.default_model, QWEN_DEFAULT_CONTEXT)
 
     def completions(self,
                     messages: List[Dict[str, str]],

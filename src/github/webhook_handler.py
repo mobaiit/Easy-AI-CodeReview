@@ -5,42 +5,42 @@ import time
 import requests
 import fnmatch
 from src.utils.log import logger
-
+from src.utils.path_filter import filter_by_path
 
 
 def filter_changes(changes: list):
     '''
-    过滤数据，只保留支持的文件类型以及必要的字段信息
-    专门处理GitHub格式的变更
+    过滤数据，只保留支持的文件类型以及必要的字段信息。
+    同时排除 vendor、node_modules 等不需要审查的目录（由 EXCLUDED_PATHS 配置）。
+    专门处理 GitHub 格式的变更。
     '''
     # 从环境变量中获取支持的文件扩展名
     supported_extensions = os.getenv('SUPPORTED_EXTENSIONS', '.java,.py,.php').split(',')
-    
+
     # 筛选出未被删除的文件
     not_deleted_changes = []
     for change in changes:
-        # 优先检查status字段是否为"removed"
+        # 优先检查 status 字段是否为 "removed"
         if change.get('status') == 'removed':
-            logger.info(f"Detected file deletion via status field: {change.get('new_path')}")
+            logger.debug(f"Detected file deletion via status field: {change.get('new_path')}")
             continue
-            
-        # 如果没有status字段或status不为"removed"，继续检查diff模式
+
+        # 如果没有 status 字段，继续检查 diff 模式
         diff = change.get('diff', '')
         if diff:
             diff_header_match = re.match(r'@@ -\d+,\d+ \+0,0 @@', diff)
             if diff_header_match:
-                # 检查除了diff头部外的所有行是否都以减号开头
-                diff_lines = diff.split('\n')[1:]  # 跳过diff头部
+                diff_lines = diff.split('\n')[1:]
                 if all(line.startswith('-') or not line for line in diff_lines):
-                    logger.info(f"Detected file deletion via diff pattern: {change.get('new_path')}")
+                    logger.debug(f"Detected file deletion via diff pattern: {change.get('new_path')}")
                     continue
-                    
+
         not_deleted_changes.append(change)
-    
-    logger.info(f"SUPPORTED_EXTENSIONS: {supported_extensions}")
-    logger.info(f"After filtering deleted files: {not_deleted_changes}")
-    
-    # 过滤 `new_path` 以支持的扩展名结尾的元素, 仅保留diff和new_path字段
+
+    # 排除不需要审查的目录/路径
+    not_excluded = filter_by_path(not_deleted_changes)
+
+    # 过滤支持的文件扩展名
     filtered_changes = [
         {
             'diff': item.get('diff', ''),
@@ -48,10 +48,9 @@ def filter_changes(changes: list):
             'additions': item.get('additions', 0),
             'deletions': item.get('deletions', 0),
         }
-        for item in not_deleted_changes
+        for item in not_excluded
         if any(item.get('new_path', '').endswith(ext) for ext in supported_extensions)
     ]
-    logger.info(f"After filtering by extension: {filtered_changes}")
     return filtered_changes
 
 

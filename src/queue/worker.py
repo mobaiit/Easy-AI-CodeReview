@@ -7,8 +7,8 @@ from src.event.event_manager import event_manager
 from src.gitlab.webhook_handler import filter_changes, MergeRequestHandler, PushHandler
 from src.github.webhook_handler import filter_changes as filter_github_changes, PullRequestHandler as GithubPullRequestHandler, PushHandler as GithubPushHandler
 from src.gitea.webhook_handler import filter_changes as filter_gitea_changes, PullRequestHandler as GiteaPullRequestHandler, PushHandler as GiteaPushHandler
-from src.gitea.webhook_handler import filter_changes as filter_gitea_changes, PullRequestHandler as GiteaPullRequestHandler, PushHandler as GiteaPushHandler
 from src.utils.code_reviewer import CodeReviewer
+from src.utils.diff_cache import compute_changes_hash, is_duplicate, mark_reviewed
 from src.utils.messaging import notifier
 from src.utils.log import logger
 
@@ -31,7 +31,7 @@ def handle_push_event(webhook_data: dict, gitlab_token: str, gitlab_url: str, gi
         if push_review_enabled:
             # 获取PUSH的changes
             changes = handler.get_push_changes()
-            logger.info('changes: %s', changes)
+            logger.debug('changes: %s', changes)
             changes = filter_changes(changes)
             if not changes:
                 logger.info('未检测到PUSH代码的修改,修改文件可能不满足SUPPORTED_EXTENSIONS。')
@@ -100,11 +100,18 @@ def handle_merge_request_event(webhook_data: dict, gitlab_token: str, gitlab_url
         # 仅仅在MR创建或更新时进行Code Review
         # 获取Merge Request的changes
         changes = handler.get_merge_request_changes()
-        logger.info('changes: %s', changes)
+        logger.debug('changes: %s', changes)
         changes = filter_changes(changes)
         if not changes:
             logger.info('未检测到有关代码的修改,修改文件可能不满足SUPPORTED_EXTENSIONS。')
             return
+
+        # diff 去重：相同内容在 TTL 内不重复审查
+        diff_hash = compute_changes_hash(changes)
+        if is_duplicate(diff_hash):
+            logger.info(f"GitLab MR diff 与近期审查内容相同（hash={diff_hash[:8]}），跳过重复审查。")
+            return
+
         # 统计本次新增、删除的代码总数
         additions = 0
         deletions = 0
@@ -121,6 +128,9 @@ def handle_merge_request_event(webhook_data: dict, gitlab_token: str, gitlab_url
         # review 代码
         commits_text = ';'.join(commit['title'] for commit in commits)
         review_result = CodeReviewer().review_and_strip_code(changes, commits_text, changes)
+
+        # 记录 hash，TTL 内同内容不再重复审查
+        mark_reviewed(diff_hash)
 
         # 将review结果提交到Gitlab的 notes
         handler.add_merge_request_notes(f'Auto Review Result: \n{review_result}')
@@ -166,7 +176,7 @@ def handle_github_push_event(webhook_data: dict, github_token: str, github_url: 
         if push_review_enabled:
             # 获取PUSH的changes
             changes = handler.get_push_changes()
-            logger.info('changes: %s', changes)
+            logger.debug('changes: %s', changes)
             changes = filter_github_changes(changes)
             if not changes:
                 logger.info('未检测到PUSH代码的修改,修改文件可能不满足SUPPORTED_EXTENSIONS。')
@@ -228,11 +238,18 @@ def handle_github_pull_request_event(webhook_data: dict, github_token: str, gith
         # 仅仅在PR创建或更新时进行Code Review
         # 获取Pull Request的changes
         changes = handler.get_pull_request_changes()
-        logger.info('changes: %s', changes)
+        logger.debug('changes: %s', changes)
         changes = filter_github_changes(changes)
         if not changes:
             logger.info('未检测到有关代码的修改,修改文件可能不满足SUPPORTED_EXTENSIONS。')
             return
+
+        # diff 去重：相同内容在 TTL 内不重复审查
+        diff_hash = compute_changes_hash(changes)
+        if is_duplicate(diff_hash):
+            logger.info(f"GitHub PR diff 与近期审查内容相同（hash={diff_hash[:8]}），跳过重复审查。")
+            return
+
         # 统计本次新增、删除的代码总数
         additions = 0
         deletions = 0
@@ -249,6 +266,9 @@ def handle_github_pull_request_event(webhook_data: dict, github_token: str, gith
         # review 代码
         commits_text = ';'.join(commit['title'] for commit in commits)
         review_result = CodeReviewer().review_and_strip_code(changes, commits_text, changes)
+
+        # 记录 hash
+        mark_reviewed(diff_hash)
 
         # 将review结果提交到GitHub的 notes
         handler.add_pull_request_notes(f'Auto Review Result: \n{review_result}')
@@ -306,7 +326,7 @@ def handle_gitea_push_event(webhook_data: dict, gitea_token: str, gitea_url: str
         if push_review_enabled:
             # 获取PUSH的changes
             changes = handler.get_push_changes()
-            logger.info('changes: %s', changes)
+            logger.debug('changes: %s', changes)
             changes = filter_gitea_changes(changes)
             if not changes:
                 logger.info('未检测到PUSH代码的修改,修改文件可能不满足SUPPORTED_EXTENSIONS。')
@@ -413,11 +433,18 @@ def handle_gitea_pull_request_event(webhook_data: dict, gitea_token: str, gitea_
         # 仅仅在PR创建或更新时进行Code Review
         # 获取Pull Request的changes
         changes = handler.get_pull_request_changes()
-        logger.info('changes: %s', changes)
+        logger.debug('changes: %s', changes)
         changes = filter_gitea_changes(changes)
         if not changes:
             logger.info('未检测到有关代码的修改,修改文件可能不满足SUPPORTED_EXTENSIONS。')
             return
+
+        # diff 去重：相同内容在 TTL 内不重复审查
+        diff_hash = compute_changes_hash(changes)
+        if is_duplicate(diff_hash):
+            logger.info(f"Gitea PR diff 与近期审查内容相同（hash={diff_hash[:8]}），跳过重复审查。")
+            return
+
         # 统计本次新增、删除的代码总数
         additions = 0
         deletions = 0
@@ -434,6 +461,9 @@ def handle_gitea_pull_request_event(webhook_data: dict, gitea_token: str, gitea_
         # review 代码
         commits_text = ';'.join(commit.get('title', commit.get('message', '')).split('\n')[0] for commit in commits)
         review_result = CodeReviewer().review_and_strip_code(changes, commits_text, changes)
+
+        # 记录 hash
+        mark_reviewed(diff_hash)
 
         # 检查是否启用 Issue 模式（默认开启）
         use_issue_mode = os.environ.get('GITEA_USE_ISSUE_MODE', '1') == '1'

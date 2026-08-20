@@ -196,33 +196,61 @@ def get_review_stats():
         return jsonify({'error': str(e)}), 500
 
 
-@api_app.route('/review/daily_report', methods=['GET'])
-def daily_report():
-    # 获取当前日期0点和23点59分59秒的时间戳
+def _generate_daily_report() -> str:
+    """
+    日报业务逻辑，不依赖 Flask 上下文，可被 APScheduler 和 HTTP 接口共同调用。
+    返回生成的日报文本，如果无数据返回 None。
+    """
     start_time = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
     end_time = datetime.now().replace(hour=23, minute=59, second=59, microsecond=0).timestamp()
 
+    if push_review_enabled:
+        df = ReviewService().get_push_review_logs(updated_at_gte=start_time, updated_at_lte=end_time)
+    else:
+        df = ReviewService().get_mr_review_logs(updated_at_gte=start_time, updated_at_lte=end_time)
+
+    if df.empty:
+        logger.info("No data to process for daily report.")
+        return None
+
+    # 去重：基于 (author, message) 组合
+    df_unique = df.drop_duplicates(subset=["author", "commit_messages"])
+    # 按照 author 排序
+    df_sorted = df_unique.sort_values(by="author")
+    commits = df_sorted.to_dict(orient="records")
+
+    report_txt = Reporter().generate_report(json.dumps(commits))
+    notifier.send_notification(content=report_txt, msg_type="markdown", title="代码提交日报")
+    return report_txt
+
+
+def _scheduled_daily_report():
+    """
+    APScheduler 定时任务入口，不依赖 Flask 上下文，捕获所有异常避免定时器崩溃。
+    """
     try:
-        if push_review_enabled:
-            df = ReviewService().get_push_review_logs(updated_at_gte=start_time, updated_at_lte=end_time)
+        result = _generate_daily_report()
+        if result is None:
+            logger.info("Daily report: no data today.")
         else:
-            df = ReviewService().get_mr_review_logs(updated_at_gte=start_time, updated_at_lte=end_time)
+            logger.info("Daily report sent successfully.")
+    except Exception as e:
+        # 定时任务里不能抛异常，否则 APScheduler 会停止该任务
+        error_msg = f"Failed to generate daily report: {e}\n{traceback.format_exc()}"
+        logger.error(error_msg)
+        try:
+            notifier.send_notification(content=error_msg, title="日报生成失败")
+        except Exception:
+            pass
 
-        if df.empty:
-            logger.info("No data to process.")
+
+@api_app.route('/review/daily_report', methods=['GET'])
+def daily_report():
+    """HTTP 接口：手动触发日报生成"""
+    try:
+        report_txt = _generate_daily_report()
+        if report_txt is None:
             return jsonify({'message': 'No data to process.'}), 200
-        # 去重：基于 (author, message) 组合
-        df_unique = df.drop_duplicates(subset=["author", "commit_messages"])
-        # 按照 author 排序
-        df_sorted = df_unique.sort_values(by="author")
-        # 转换为适合生成日报的格式
-        commits = df_sorted.to_dict(orient="records")
-        # 生成日报内容
-        report_txt = Reporter().generate_report(json.dumps(commits))
-        # 发送钉钉通知
-        notifier.send_notification(content=report_txt, msg_type="markdown", title="代码提交日报")
-
-        # 返回生成的日报内容
         return json.dumps(report_txt, ensure_ascii=False, indent=4)
     except Exception as e:
         logger.error(f"Failed to generate daily report: {e}")
@@ -239,9 +267,10 @@ def setup_scheduler():
         cron_parts = crontab_expression.split()
         cron_minute, cron_hour, cron_day, cron_month, cron_day_of_week = cron_parts
 
-        # Schedule the task based on the crontab expression
+        # 调度器调用 _scheduled_daily_report，而不是 Flask route handler
+        # 避免在 Flask 应用上下文之外调用 jsonify 导致报错
         scheduler.add_job(
-            daily_report,
+            _scheduled_daily_report,
             trigger=CronTrigger(
                 minute=cron_minute,
                 hour=cron_hour,
@@ -251,11 +280,8 @@ def setup_scheduler():
             )
         )
 
-        # Start the scheduler
         scheduler.start()
         logger.info("Scheduler started successfully.")
-
-        # Shut down the scheduler when exiting the app
         atexit.register(lambda: scheduler.shutdown())
     except Exception as e:
         logger.error(f"Error setting up scheduler: {e}")
@@ -316,7 +342,7 @@ def handle_github_webhook(event_type, data):
 
     # 打印整个payload数据
     logger.info(f'Received GitHub event: {event_type}')
-    logger.info(f'Payload: {json.dumps(data)}')
+    logger.debug(f'Payload: {json.dumps(data)}')
 
     if event_type == "pull_request":
         # 使用handle_queue进行异步处理
@@ -364,7 +390,7 @@ def handle_gitlab_webhook(data):
 
     # 打印整个payload数据，或根据需求进行处理
     logger.info(f'Received event: {object_kind}')
-    logger.info(f'Payload: {json.dumps(data)}')
+    logger.debug(f'Payload: {json.dumps(data)}')
 
     # 处理Merge Request Hook
     if object_kind == "merge_request":

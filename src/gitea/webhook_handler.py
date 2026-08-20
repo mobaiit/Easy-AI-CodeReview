@@ -6,47 +6,49 @@ import fnmatch
 import requests
 
 from src.utils.log import logger
+from src.utils.path_filter import filter_by_path
 
 
 def filter_changes(changes: list):
     '''
-    过滤数据，只保留支持的文件类型以及必要的字段信息
-    复用 GitLab 的 filter_changes 逻辑（格式相同）
+    过滤数据，只保留支持的文件类型以及必要的字段信息。
+    同时排除 vendor、node_modules 等不需要审查的目录（由 EXCLUDED_PATHS 配置）。
     '''
     # 从环境变量中获取支持的文件扩展名
     supported_extensions = os.getenv('SUPPORTED_EXTENSIONS', '.java,.py,.php').split(',')
 
-    filter_deleted_files_changes = [change for change in changes if not change.get("deleted_file")]
+    # 排除已删除文件
+    not_deleted = [change for change in changes if not change.get("deleted_file")]
 
-    # 过滤 `new_path` 以支持的扩展名结尾的元素, 仅保留diff和new_path字段
+    # 排除不需要审查的目录/路径
+    not_excluded = filter_by_path(not_deleted)
+
+    # 过滤支持的文件扩展名，并规范化字段
     filtered_changes = []
-    for item in filter_deleted_files_changes:
+    for item in not_excluded:
         new_path = item.get('new_path', '')
         if not new_path:
             continue
-        
-        # 检查文件扩展名
+
         if not any(new_path.endswith(ext) for ext in supported_extensions):
             continue
-        
-        # 优先使用已有的 additions 和 deletions 值（如果存在）
+
+        # 优先使用已有的 additions 和 deletions，没有则从 diff 计算
         additions = item.get('additions', 0)
         deletions = item.get('deletions', 0)
-        
-        # 如果没有提供，尝试从 diff 中计算
         diff_content = item.get('diff', '')
         if additions == 0 and deletions == 0 and diff_content:
             additions = len(re.findall(r'^\+(?!\+\+)', diff_content, re.MULTILINE))
             deletions = len(re.findall(r'^-(?!--)', diff_content, re.MULTILINE))
-        
+
         filtered_changes.append({
             'diff': diff_content,
             'new_path': new_path,
             'additions': additions,
             'deletions': deletions
         })
-    
-    logger.debug(f"filter_changes: filtered {len(filtered_changes)} files from {len(changes)} changes")
+
+    logger.debug(f"filter_changes: {len(filtered_changes)} files kept from {len(changes)} total")
     return filtered_changes
 
 

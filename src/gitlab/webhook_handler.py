@@ -6,18 +6,24 @@ import fnmatch
 import requests
 
 from src.utils.log import logger
+from src.utils.path_filter import filter_by_path
 
 
 def filter_changes(changes: list):
     '''
-    过滤数据，只保留支持的文件类型以及必要的字段信息
+    过滤数据，只保留支持的文件类型以及必要的字段信息。
+    同时排除 vendor、node_modules 等不需要审查的目录（由 EXCLUDED_PATHS 配置）。
     '''
     # 从环境变量中获取支持的文件扩展名
     supported_extensions = os.getenv('SUPPORTED_EXTENSIONS', '.java,.py,.php').split(',')
 
-    filter_deleted_files_changes = [change for change in changes if not change.get("deleted_file")]
+    # 排除已删除文件
+    not_deleted = [change for change in changes if not change.get("deleted_file")]
 
-    # 过滤 `new_path` 以支持的扩展名结尾的元素, 仅保留diff和new_path字段
+    # 排除不需要审查的目录/路径
+    not_excluded = filter_by_path(not_deleted)
+
+    # 过滤支持的文件扩展名，并规范化字段
     filtered_changes = [
         {
             'diff': item.get('diff', ''),
@@ -25,7 +31,7 @@ def filter_changes(changes: list):
             'additions': len(re.findall(r'^\+(?!\+\+)', item.get('diff', ''), re.MULTILINE)),
             'deletions': len(re.findall(r'^-(?!--)', item.get('diff', ''), re.MULTILINE))
         }
-        for item in filter_deleted_files_changes
+        for item in not_excluded
         if any(item.get('new_path', '').endswith(ext) for ext in supported_extensions)
     ]
     return filtered_changes
