@@ -5,7 +5,10 @@ FROM python:3.10-slim AS base
 WORKDIR /app
 
 # 安装 supervisord 作为进程管理工具
-RUN apt-get update && apt-get install -y --no-install-recommends supervisor && rm -rf /var/lib/apt/lists/*
+RUN rm -f /etc/apt/apt.conf.d/docker-clean \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends supervisor \
+    && rm -rf /var/lib/apt/lists/*
 
 # 复制项目文件&创建必要的文件夹
 COPY requirements.txt .
