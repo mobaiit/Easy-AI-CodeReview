@@ -35,15 +35,14 @@ def handle_push_event(webhook_data: dict, gitlab_token: str, gitlab_url: str, gi
             changes = filter_changes(changes)
             if not changes:
                 logger.info('未检测到PUSH代码的修改,修改文件可能不满足SUPPORTED_EXTENSIONS。')
-            review_result = "关注的文件没有修改"
+                return
 
-            if len(changes) > 0:
-                commits_text = ';'.join(commit.get('message', '').strip() for commit in commits)
-                review_result = CodeReviewer().review_and_strip_code(changes, commits_text, changes)
-                score = CodeReviewer.parse_review_score(review_text=review_result)
-                for item in changes:
-                    additions += item['additions']
-                    deletions += item['deletions']
+            commits_text = ';'.join(commit.get('message', '').strip() for commit in commits)
+            review_result = CodeReviewer().review_and_strip_code(changes, commits_text, changes)
+            score = CodeReviewer.parse_review_score(review_text=review_result)
+            for item in changes:
+                additions += item['additions']
+                deletions += item['deletions']
             # 将review结果提交到Gitlab的 notes
             handler.add_push_notes(f'Auto Review Result: \n{review_result}')
 
@@ -180,15 +179,14 @@ def handle_github_push_event(webhook_data: dict, github_token: str, github_url: 
             changes = filter_github_changes(changes)
             if not changes:
                 logger.info('未检测到PUSH代码的修改,修改文件可能不满足SUPPORTED_EXTENSIONS。')
-            review_result = "关注的文件没有修改"
+                return
 
-            if len(changes) > 0:
-                commits_text = ';'.join(commit.get('message', '').strip() for commit in commits)
-                review_result = CodeReviewer().review_and_strip_code(changes, commits_text, changes)
-                score = CodeReviewer.parse_review_score(review_text=review_result)
-                for item in changes:
-                    additions += item.get('additions', 0)
-                    deletions += item.get('deletions', 0)
+            commits_text = ';'.join(commit.get('message', '').strip() for commit in commits)
+            review_result = CodeReviewer().review_and_strip_code(changes, commits_text, changes)
+            score = CodeReviewer.parse_review_score(review_text=review_result)
+            for item in changes:
+                additions += item.get('additions', 0)
+                deletions += item.get('deletions', 0)
             # 将review结果提交到GitHub的 notes
             handler.add_push_notes(f'Auto Review Result: \n{review_result}')
 
@@ -330,28 +328,25 @@ def handle_gitea_push_event(webhook_data: dict, gitea_token: str, gitea_url: str
             changes = filter_gitea_changes(changes)
             if not changes:
                 logger.info('未检测到PUSH代码的修改,修改文件可能不满足SUPPORTED_EXTENSIONS。')
-            review_result = "关注的文件没有修改"
+                return
 
-            if len(changes) > 0:
-                commits_text = ';'.join(commit.get('message', '').strip() for commit in commits)
-                review_result = CodeReviewer().review_and_strip_code(changes, commits_text, changes)
-                score = CodeReviewer.parse_review_score(review_text=review_result)
-                for item in changes:
-                    additions += item.get('additions', 0)
-                    deletions += item.get('deletions', 0)
-            
+            commits_text = ';'.join(commit.get('message', '').strip() for commit in commits)
+            review_result = CodeReviewer().review_and_strip_code(changes, commits_text, changes)
+            score = CodeReviewer.parse_review_score(review_text=review_result)
+            for item in changes:
+                additions += item.get('additions', 0)
+                deletions += item.get('deletions', 0)
+
             # 检查是否启用 Issue 模式（默认开启）
             use_issue_mode = os.environ.get('GITEA_USE_ISSUE_MODE', '1') == '1'
-            
-            if use_issue_mode and len(changes) > 0:
-                # Issue 模式：创建/获取 Issue 并添加评论
+
+            if use_issue_mode:
                 try:
-                    # 准备审核元数据
                     last_commit = commits[-1] if commits else {}
                     commit_sha = last_commit.get('url', '').split('/')[-1] if last_commit.get('url') else ''
                     if not commit_sha and handler.commit_list:
                         commit_sha = handler.commit_list[-1].get('id', '')
-                    
+
                     review_metadata = {
                         'author': author or 'unknown',
                         'commit_sha': commit_sha,
@@ -361,18 +356,15 @@ def handle_gitea_push_event(webhook_data: dict, gitea_token: str, gitea_url: str
                         'deletions': deletions,
                         'files': [change.get('new_path', '') for change in changes]
                     }
-                    
+
                     issue_number = handler.create_or_get_review_issue(review_metadata)
                     handler.add_issue_comment(issue_number, review_result)
                     logger.info(f"Review result added to issue #{issue_number}")
                 except Exception as e:
                     logger.error(f"Failed to add review to issue: {str(e)}")
-                    import traceback
                     logger.debug(traceback.format_exc())
-                    # 降级到传统模式
                     handler.add_push_notes(f'Auto Review Result: \n{review_result}')
             else:
-                # 传统模式：直接在 commit 上添加评论
                 handler.add_push_notes(f'Auto Review Result: \n{review_result}')
 
         event_manager['push_reviewed'].send(PushReviewEntity(
