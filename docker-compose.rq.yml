@@ -11,6 +11,8 @@ services:
     volumes:
       - data:/app/data
       - log:/app/logs
+      - ./config/prompt_templates.yml:/app/config/prompt_templates.yml
+      - ./config/user_map.yml:/app/config/user_map.yml
     env_file:
       - ./config/.env
     depends_on:
