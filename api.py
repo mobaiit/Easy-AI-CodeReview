@@ -219,7 +219,8 @@ def _generate_daily_report() -> str:
     df_sorted = df_unique.sort_values(by="author")
     commits = df_sorted.to_dict(orient="records")
 
-    report_txt = Reporter().generate_report(json.dumps(commits))
+    authors = df_sorted['author'].dropna().tolist()
+    report_txt = Reporter().generate_report(json.dumps(commits), authors=authors)
     notifier.send_notification(content=report_txt, msg_type="markdown", title="代码提交日报")
     return report_txt
 

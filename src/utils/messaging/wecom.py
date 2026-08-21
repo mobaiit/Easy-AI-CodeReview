@@ -80,8 +80,8 @@ class WeComNotifier:
         # 处理链接格式
         content = re.sub(r'\[(.*?)\]\((.*?)\)', r'[链接]\2', content)
 
-        # 移除HTML标签
-        content = re.sub(r'<[^>]+>', '', content)
+        # 移除HTML标签，但保留企微 @提及格式 <@userid>
+        content = re.sub(r'<(?!@[\w]+>)[^>]+>', '', content)
 
         formatted_content += content
         return formatted_content
