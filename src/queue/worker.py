@@ -50,7 +50,7 @@ def handle_push_event(webhook_data: dict, gitlab_token: str, gitlab_url: str, gi
         event_manager['push_reviewed'].send(PushReviewEntity(
             project_name=webhook_data['project']['name'],
             author=webhook_data['user_username'],
-            branch=webhook_data['project']['default_branch'],
+            branch=webhook_data.get('ref', '').replace('refs/heads/', ''),
             updated_at=int(datetime.now().timestamp()),  # 当前时间
             commits=commits,
             score=score,
