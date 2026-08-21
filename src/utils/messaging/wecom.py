@@ -126,32 +126,40 @@ class WeComNotifier:
             # https://developer.work.weixin.qq.com/document/path/91770#markdown%E7%B1%BB%E5%9E%8B
             MAX_CONTENT_BYTES = 4096 if msg_type == 'markdown' else 2048
 
+            # markdown 类型发送时会在前面拼接 "## 标题\n\n"，需预留标题占用的字节
+            title_overhead = len(f"## {title}\n\n".encode('utf-8')) if (msg_type == 'markdown' and title) else 0
+            # 同时预留 at_tag 占用的字节（附加在末尾）
+            at_tag_overhead = len(f"\n\n{at_tag}".encode('utf-8')) if at_tag else 0
+            effective_max_bytes = MAX_CONTENT_BYTES - title_overhead - at_tag_overhead
+
             # 检查内容长度
             content_length = len(content.encode('utf-8'))
 
-            if content_length <= MAX_CONTENT_BYTES:
+            if content_length <= effective_max_bytes:
                 # 内容长度在限制范围内，直接发送
                 data = self._build_message(content, title, msg_type, is_at_all, at_tag)
                 self._send_message(post_url, data)
             else:
                 # 内容超过限制，需要分割发送，@ 标记只加在最后一块
                 logger.warning(f"消息内容超过{MAX_CONTENT_BYTES}字节限制，将分割发送。总长度: {content_length}字节")
-                self._send_message_in_chunks(content, title, post_url, msg_type, is_at_all, MAX_CONTENT_BYTES, at_tag)
+                self._send_message_in_chunks(content, title, post_url, msg_type, is_at_all, effective_max_bytes, at_tag)
 
         except Exception as e:
             logger.error(f"企业微信消息发送失败! {e}")
 
     def _send_message_in_chunks(self, content, title, post_url, msg_type, is_at_all, max_bytes, at_tag=''):
         """
-        将内容分割成多个部分并分别发送，@ 标记只附加在最后一块
+        将内容分割成多个部分并分别发送，@ 标记只附加在最后一块。
+        max_bytes 已是扣除首块标题和 at_tag 后的有效字节上限。
         """
         chunks = self._split_content(content, max_bytes)
+        total = len(chunks)
         for i, chunk in enumerate(chunks):
-            chunk_title = f"{title} (第{i + 1}/{len(chunks)}部分)" if title else f"消息 (第{i + 1}/{len(chunks)}部分)"
+            chunk_title = f"{title} (第{i + 1}/{total}部分)" if title else f"消息 (第{i + 1}/{total}部分)"
             # 仅最后一块携带 @ 标记
-            chunk_at_tag = at_tag if i == len(chunks) - 1 else ''
+            chunk_at_tag = at_tag if i == total - 1 else ''
             data = self._build_message(chunk, chunk_title, msg_type, is_at_all, chunk_at_tag)
-            self._send_message(post_url, data, chunk_num=i + 1, total_chunks=len(chunks))
+            self._send_message(post_url, data, chunk_num=i + 1, total_chunks=total)
 
     def _split_content(self, content, max_bytes):
         """

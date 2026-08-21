@@ -11,6 +11,7 @@ services:
       - ./data:/app/data
       - ./log:/app/log
       - ./config/prompt_templates.yml:/app/config/prompt_templates.yml
+      - ./config/user_map.yml:/app/config/user_map.yml
     env_file:
       - ./config/.env
     restart: unless-stopped
