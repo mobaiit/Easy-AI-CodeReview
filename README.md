@@ -156,6 +156,8 @@ GITLAB_ACCESS_TOKEN={YOUR_GITLAB_ACCESS_TOKEN}
 
 ```bash
 docker-compose up -d
+
+多架构环境下启动：DOCKER_BUILDKIT=0 docker compose -f docker-compose.yml up -d --build
 ```
 
 **3. 验证部署**
