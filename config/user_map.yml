@@ -1,0 +1,15 @@
+# 提交人到企业微信账号的映射配置
+# 格式：git提交人名称: 企业微信userid
+# 用于在企微消息末尾自动 @ 提交者，格式为 <@userid>
+# 找不到映射时，会用提交人原始名字兜底
+
+wecom_user_map:
+  pyk: panyuanke
+  zhangyuan: zhangyuan
+  zhuangcheng: zhuangcheng
+  yizhiyuan: yizhiyuan
+  yuchen: huwan
+  oujian: oujian
+  lyh : luoyahui
+  HuanrongMa : MaHuanRong
+  ns : zhangniansheng

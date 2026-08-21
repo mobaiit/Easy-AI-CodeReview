@@ -7,7 +7,7 @@ from src.utils.messaging.wecom import WeComNotifier
 
 
 def send_notification(content, msg_type='text', title="通知", is_at_all=False, project_name=None, url_slug=None,
-                      webhook_data: dict={}):
+                      webhook_data: dict={}, author=None):
     """
     并发发送通知消息到配置的平台（钉钉、企业微信、飞书、自定义 Webhook）。
     各渠道的 HTTP 请求并发执行，总耗时取决于最慢的那个渠道，而非各渠道之和。
@@ -19,6 +19,7 @@ def send_notification(content, msg_type='text', title="通知", is_at_all=False,
     :param project_name: 项目名称，用于按项目路由 Webhook
     :param url_slug: 由 Git 服务器 URL 转换成的 slug，用于按实例路由 Webhook
     :param webhook_data: push event、merge event 的原始数据
+    :param author: git 提交人名称，用于企微消息末尾 @ 提醒
     """
     common_kwargs = dict(
         content=content, msg_type=msg_type, title=title,
@@ -30,7 +31,7 @@ def send_notification(content, msg_type='text', title="通知", is_at_all=False,
         DingTalkNotifier().send_message(**common_kwargs)
 
     def _send_wecom():
-        WeComNotifier().send_message(**common_kwargs)
+        WeComNotifier().send_message(**common_kwargs, author=author)
 
     def _send_feishu():
         FeishuNotifier().send_message(**common_kwargs)

@@ -2,7 +2,27 @@ import json
 import requests
 import os
 import re
+import yaml
 from src.utils.log import logger
+
+
+def _load_wecom_user_map() -> dict:
+    """
+    从 config/user_map.yml 加载企微用户映射表。
+    返回 {git用户名: 企微userid} 的字典，加载失败时返回空字典。
+    """
+    config_path = os.path.join(os.path.dirname(__file__), '..', '..', '..', 'config', 'user_map.yml')
+    config_path = os.path.normpath(config_path)
+    try:
+        with open(config_path, 'r', encoding='utf-8') as f:
+            data = yaml.safe_load(f)
+            return data.get('wecom_user_map', {}) or {}
+    except FileNotFoundError:
+        logger.warning(f"未找到企微用户映射配置文件: {config_path}")
+        return {}
+    except Exception as e:
+        logger.warning(f"加载企微用户映射配置失败: {e}")
+        return {}
 
 
 class WeComNotifier:
@@ -66,8 +86,21 @@ class WeComNotifier:
         formatted_content += content
         return formatted_content
 
+    def _resolve_at_tag(self, author: str) -> str:
+        """
+        根据 git 提交人名称，从映射表解析出企微 @ 标记。
+        找不到映射时用原始名字兜底。
+        :param author: git 提交人名称
+        :return: 形如 <@panyuanke> 的字符串，author 为空时返回空字符串
+        """
+        if not author:
+            return ''
+        user_map = _load_wecom_user_map()
+        wecom_id = user_map.get(author, author)
+        return f'<@{wecom_id}>'
+
     def send_message(self, content, msg_type='text', title=None, is_at_all=False, project_name=None,
-                     url_slug=None):
+                     url_slug=None, author=None):
         """
         发送企业微信消息
         :param content: 消息内容
@@ -76,6 +109,7 @@ class WeComNotifier:
         :param is_at_all: 是否 @所有人
         :param project_name: 关联项目名称
         :param url_slug: GitLab URL Slug
+        :param author: git 提交人名称，用于在消息末尾添加 @ 提醒
         """
         if not self.enabled:
             logger.info("企业微信推送未启用")
@@ -83,6 +117,8 @@ class WeComNotifier:
 
         try:
             post_url = self._get_webhook_url(project_name=project_name, url_slug=url_slug)
+            at_tag = self._resolve_at_tag(author)
+
             # 企业微信消息内容最大长度限制
             # text类型最大2048字节
             # https://developer.work.weixin.qq.com/document/path/91770#%E6%96%87%E6%9C%AC%E7%B1%BB%E5%9E%8B
@@ -95,24 +131,26 @@ class WeComNotifier:
 
             if content_length <= MAX_CONTENT_BYTES:
                 # 内容长度在限制范围内，直接发送
-                data = self._build_message(content, title, msg_type, is_at_all)
+                data = self._build_message(content, title, msg_type, is_at_all, at_tag)
                 self._send_message(post_url, data)
             else:
-                # 内容超过限制，需要分割发送
+                # 内容超过限制，需要分割发送，@ 标记只加在最后一块
                 logger.warning(f"消息内容超过{MAX_CONTENT_BYTES}字节限制，将分割发送。总长度: {content_length}字节")
-                self._send_message_in_chunks(content, title, post_url, msg_type, is_at_all, MAX_CONTENT_BYTES)
+                self._send_message_in_chunks(content, title, post_url, msg_type, is_at_all, MAX_CONTENT_BYTES, at_tag)
 
         except Exception as e:
             logger.error(f"企业微信消息发送失败! {e}")
 
-    def _send_message_in_chunks(self, content, title, post_url, msg_type, is_at_all, max_bytes):
+    def _send_message_in_chunks(self, content, title, post_url, msg_type, is_at_all, max_bytes, at_tag=''):
         """
-        将内容分割成多个部分并分别发送
+        将内容分割成多个部分并分别发送，@ 标记只附加在最后一块
         """
         chunks = self._split_content(content, max_bytes)
         for i, chunk in enumerate(chunks):
             chunk_title = f"{title} (第{i + 1}/{len(chunks)}部分)" if title else f"消息 (第{i + 1}/{len(chunks)}部分)"
-            data = self._build_message(chunk, chunk_title, msg_type, is_at_all)
+            # 仅最后一块携带 @ 标记
+            chunk_at_tag = at_tag if i == len(chunks) - 1 else ''
+            data = self._build_message(chunk, chunk_title, msg_type, is_at_all, chunk_at_tag)
             self._send_message(post_url, data, chunk_num=i + 1, total_chunks=len(chunks))
 
     def _split_content(self, content, max_bytes):
@@ -169,12 +207,12 @@ class WeComNotifier:
             logger.error(f"企业微信返回的 JSON 解析失败! url:{url}, error: {e}")
         return None
 
-    def _build_message(self, content, title, msg_type, is_at_all):
+    def _build_message(self, content, title, msg_type, is_at_all, at_tag=''):
         """ 构造消息 """
         if msg_type == 'text':
             return self._build_text_message(content, is_at_all)
         elif msg_type =='markdown':
-            return self._build_markdown_message(content, title)
+            return self._build_markdown_message(content, title, at_tag)
         else:
             raise ValueError(f"不支持的消息类型: {msg_type}")
 
@@ -188,9 +226,11 @@ class WeComNotifier:
             }
         }
 
-    def _build_markdown_message(self, content, title):
-        """ 构造 Markdown 消息 """
+    def _build_markdown_message(self, content, title, at_tag=''):
+        """ 构造 Markdown 消息，at_tag 在格式化之后拼接，避免被 HTML 清洗逻辑误删 """
         formatted_content = self.format_markdown_content(content, title)
+        if at_tag:
+            formatted_content += f'\n\n{at_tag}'
         return {
             "msgtype": "markdown",
             "markdown": {
