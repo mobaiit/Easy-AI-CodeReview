@@ -13,6 +13,17 @@ from src.utils.messaging import notifier
 from src.utils.log import logger
 
 
+def _review_target_branch_allowed(target_branch: str) -> bool:
+    branch_names = [
+        name.strip()
+        for name in os.environ.get('MERGE_REVIEW_ONLY_BRANCH_NAME', '').split(',')
+        if name.strip()
+    ]
+    if branch_names and target_branch not in branch_names:
+        logger.info("Merge/Pull Request target branch=%s, ignored.", target_branch)
+        return False
+    return True
+
 
 def handle_push_event(webhook_data: dict, gitlab_token: str, gitlab_url: str, gitlab_url_slug: str):
     push_review_enabled = os.environ.get('PUSH_REVIEW_ENABLED', '0') == '1'
@@ -76,10 +87,6 @@ def handle_merge_request_event(webhook_data: dict, gitlab_token: str, gitlab_url
     :return:
     '''
     merge_review_only_protected_branches = os.environ.get('MERGE_REVIEW_ONLY_PROTECTED_BRANCHES_ENABLED', '0') == '1'
-    merge_review_only_branch_name_str = os.environ.get('MERGE_REVIEW_ONLY_BRANCH_NAME', '')  # 需要review的分支名称，逗号分隔
-    merge_review_only_branch_names = [b.strip() for b in merge_review_only_branch_name_str.split(',') if b.strip()] if merge_review_only_branch_name_str else []
-
-
     try:
         # 解析Webhook数据
         handler = MergeRequestHandler(webhook_data, gitlab_token, gitlab_url)
@@ -89,8 +96,7 @@ def handle_merge_request_event(webhook_data: dict, gitlab_token: str, gitlab_url
             logger.info("Merge Request target branch not match protected branches, ignored.")
             return
         # 判断分支名称进行过滤
-        if merge_review_only_branch_names and webhook_data['object_attributes']['target_branch'] not in merge_review_only_branch_names:
-            logger.info(f"Merge Request Hook event, branch={webhook_data['object_attributes']['target_branch']}, ignored.")
+        if not _review_target_branch_allowed(webhook_data['object_attributes']['target_branch']):
             return
         if handler.action not in ['open', 'update']:
             logger.info(f"Merge Request Hook event, action={handler.action}, ignored.")
@@ -227,6 +233,9 @@ def handle_github_pull_request_event(webhook_data: dict, github_token: str, gith
         # 如果开启了仅review projected branches的，判断当前目标分支是否为projected branches
         if merge_review_only_protected_branches and not handler.target_branch_protected():
             logger.info("Merge Request target branch not match protected branches, ignored.")
+            return
+
+        if not _review_target_branch_allowed(webhook_data['pull_request']['base']['ref']):
             return
 
         if handler.action not in ['opened', 'synchronize']:
@@ -416,6 +425,9 @@ def handle_gitea_pull_request_event(webhook_data: dict, gitea_token: str, gitea_
         # 如果开启了仅review protected branches的，判断当前目标分支是否为protected branches
         if merge_review_only_protected_branches and not handler.target_branch_protected():
             logger.info("Pull Request target branch not match protected branches, ignored.")
+            return
+
+        if not _review_target_branch_allowed(pull_request['base']['ref']):
             return
 
         if handler.action not in ['opened', 'synchronize']:

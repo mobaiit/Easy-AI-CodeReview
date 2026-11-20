@@ -428,6 +428,7 @@ review_max_tokens = int(os.getenv("REVIEW_MAX_TOKENS", 10000))
 
 - **`PUSH_REVIEW_ENABLED`**: 是否启用Push事件审查
 - **`MERGE_REVIEW_ONLY_PROTECTED_BRANCHES_ENABLED`**: 是否仅对受保护分支进行审查
+- **`MERGE_REVIEW_ONLY_BRANCH_NAME`**: 仅审查目标分支在列表中的 GitLab MR、GitHub/Gitea PR；多个分支用逗号分隔，留空则不限制。Push 审查不受此配置影响
 
 ### 详细审查模式配置
 
@@ -551,6 +552,8 @@ SUPPORTED_EXTENSIONS=.java,.py,.php,.yml,.vue,.go,.c,.cpp,.h,.js,.css,.md,.sql
 # 功能开关
 PUSH_REVIEW_ENABLED=1
 MERGE_REVIEW_ONLY_PROTECTED_BRANCHES_ENABLED=0
+# 仅审查目标分支为 test 的 MR/PR；若不需要其他分支的 Push 审查，设置 PUSH_REVIEW_ENABLED=0
+MERGE_REVIEW_ONLY_BRANCH_NAME=test
 
 # GitLab配置
 GITLAB_ACCESS_TOKEN=your_gitlab_token_here
