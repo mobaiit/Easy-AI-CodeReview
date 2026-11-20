@@ -219,6 +219,55 @@ class PushHandler:
         logger.info(f"Collected {len(commit_details)} commits from push event.")
         return commit_details
 
+    def _is_merge_commit_by_message(self, after: str) -> bool:
+        """Use the pushed tip's message when the commit API cannot confirm its parents."""
+        for commit in self.commit_list:
+            if not isinstance(commit, dict) or str(commit.get('id', '')).lower() != after.lower():
+                continue
+            message = commit.get('message')
+            if not isinstance(message, str):
+                return False
+            subject = message.split('\n', 1)[0].strip()
+            return bool(re.match(r'^Merge (?:branch(?:es)?|remote-tracking branch|pull request)\b', subject, re.IGNORECASE))
+        return False
+
+    def is_merge_commit_push(self) -> bool:
+        """Check whether a branch push ends at a merge commit."""
+        if self.event_type != 'push' or not self.webhook_data.get('ref', '').startswith('refs/heads/'):
+            return False
+
+        before = self.webhook_data.get('before', '')
+        after = self.webhook_data.get('after', '')
+        if not before or before.startswith('0000000'):
+            return False
+        if not re.fullmatch(r'[0-9a-fA-F]{40}|[0-9a-fA-F]{64}', after):
+            return False
+        if after.startswith('0000000'):
+            return False
+        if not self.project_id:
+            logger.warning('Missing GitLab project ID; checking push commit %s by message', after)
+            return self._is_merge_commit_by_message(after)
+
+        url = urljoin(
+            f"{self.gitlab_url}/",
+            f"api/v4/projects/{self.project_id}/repository/commits/{after}"
+        )
+        try:
+            response = requests.get(
+                url, headers={'Private-Token': self.gitlab_token}, verify=False, timeout=5
+            )
+            if response.status_code != 200:
+                logger.warning('Failed to check GitLab push commit %s: HTTP %s', after, response.status_code)
+                return self._is_merge_commit_by_message(after)
+            parent_ids = response.json().get('parent_ids')
+            if not isinstance(parent_ids, list):
+                logger.warning('GitLab push commit %s has no valid parent_ids; checking message', after)
+                return self._is_merge_commit_by_message(after)
+            return len(parent_ids) >= 2
+        except (requests.RequestException, ValueError, AttributeError) as exc:
+            logger.warning('Failed to check GitLab push commit %s: %s', after, exc)
+            return self._is_merge_commit_by_message(after)
+
     def add_push_notes(self, message: str):
         # 添加评论到 GitLab Push 请求的提交中（此处假设是在最后一次提交上添加注释）
         if not self.commit_list:

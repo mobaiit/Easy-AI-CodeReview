@@ -30,6 +30,10 @@ def handle_push_event(webhook_data: dict, gitlab_token: str, gitlab_url: str, gi
     try:
         handler = PushHandler(webhook_data, gitlab_token, gitlab_url)
         logger.info('Push Hook event received')
+        if os.environ.get('PUSH_REVIEW_SKIP_MERGE_ENABLED', '0') == '1':
+            if handler.is_merge_commit_push():
+                logger.info('GitLab merge commit push ignored: %s', webhook_data.get('after', ''))
+                return
         commits = handler.get_push_commits()
         if not commits:
             logger.error('Failed to get commits')

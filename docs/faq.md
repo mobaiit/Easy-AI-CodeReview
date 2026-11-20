@@ -595,12 +595,9 @@ Push 代码后没有进行代码审查。
    PUSH_REVIEW_ENABLED=1  # 0=禁用，1=启用
    ```
 
-2. **检查分支保护设置**
-   
-   如果启用了 `MERGE_REVIEW_ONLY_PROTECTED_BRANCHES_ENABLED`，只有受保护分支的 Push 才会触发审查：
-   ```bash
-   MERGE_REVIEW_ONLY_PROTECTED_BRANCHES_ENABLED=0  # 0=所有分支，1=仅受保护分支
-   ```
+2. **检查是否启用了合并 Push 排除开关（仅 GitLab）**
+
+   如果 `PUSH_REVIEW_SKIP_MERGE_ENABLED=1`，只在 webhook 的 `after` 提交是 merge commit 时跳过整次 Push 的审查、通知和日志，即使 `PUSH_REVIEW_ENABLED=0` 也生效；较早的合并提交不会触发跳过。此设置不按分支过滤。GitLab 提交 API 查询失败时，降级检查 `after` 提交的消息；无法识别的自定义合并消息仍会照常处理。
 
 3. **确认 Webhook 事件配置**
    

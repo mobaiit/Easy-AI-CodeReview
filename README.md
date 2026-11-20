@@ -427,6 +427,7 @@ review_max_tokens = int(os.getenv("REVIEW_MAX_TOKENS", 10000))
 ### 功能开关配置
 
 - **`PUSH_REVIEW_ENABLED`**: 是否启用Push事件审查
+- **`PUSH_REVIEW_SKIP_MERGE_ENABLED`**: 是否跳过以 merge commit 结尾的 GitLab Push；默认 `0`，与 `PUSH_REVIEW_ENABLED` 独立。只判断 webhook 中 `after` 对应的提交：优先使用 GitLab 提交 API 的 `parent_ids`，API 查询失败时根据提交消息识别常见合并格式。`after` 是合并提交时整次 Push 都不审查、不通知、不记录；如果合并提交之后还有普通提交，则不会跳过。Fast-forward 合并和自定义合并消息可能无法通过消息兜底识别
 - **`MERGE_REVIEW_ONLY_PROTECTED_BRANCHES_ENABLED`**: 是否仅对受保护分支进行审查
 - **`MERGE_REVIEW_ONLY_BRANCH_NAME`**: 仅审查目标分支在列表中的 GitLab MR、GitHub/Gitea PR；多个分支用逗号分隔，留空则不限制。Push 审查不受此配置影响
 
@@ -551,6 +552,7 @@ SUPPORTED_EXTENSIONS=.java,.py,.php,.yml,.vue,.go,.c,.cpp,.h,.js,.css,.md,.sql
 
 # 功能开关
 PUSH_REVIEW_ENABLED=1
+PUSH_REVIEW_SKIP_MERGE_ENABLED=1
 MERGE_REVIEW_ONLY_PROTECTED_BRANCHES_ENABLED=0
 # 仅审查目标分支为 test 的 MR/PR；若不需要其他分支的 Push 审查，设置 PUSH_REVIEW_ENABLED=0
 MERGE_REVIEW_ONLY_BRANCH_NAME=test
